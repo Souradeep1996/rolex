@@ -581,29 +581,12 @@ config QPNP_MISC
 	  and the driver provides an API to check if this interrupt
 	  is available on the current PMIC chip.
 
-config UID_SYS_STATS_DEBUG
-	bool "Per-TASK statistics"
-	depends on UID_SYS_STATS
-	default n
+config FORCE_FAST_CHARGE
+	bool "Force AC charge mode at will"
+	default y
 	help
-	  Per TASK based io statistics exported to /proc/uid_io
-
-config MEMORY_STATE_TIME
-	tristate "Memory freq/bandwidth time statistics"
-	depends on PROFILING
-	help
-	  Memory time statistics exported to /sys/kernel/memory_state_time
-config AW87319
-	bool "AW87319 Ext. Speaker Amp."
-	default n
-	help
-	  Enables external speaker amp. If unsure say 'n'.
-
-config FORCE_FAST_CHARGE 
-	bool "Force faster charge rate for USB"
-	default n
-	help
-	  This allows users to override default charge rate for USB
+	  A simple sysfs interface to force adapters that
+	  are detected as USB to charge as AC.
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
