@@ -42,6 +42,7 @@
 #define MIN_FREQUENCY_UP_THRESHOLD		(11)
 #define MAX_FREQUENCY_UP_THRESHOLD		(100)
 #define MIN_FREQUENCY_DOWN_DIFFERENTIAL		(1)
+#define DBS_INPUT_EVENT_MIN_FREQ		(810000)
 
 /* Phase configurables */
 #define MAX_IDLE_COUNTER			160
@@ -57,10 +58,10 @@
 bool gpu_busy_state;
 #define GPU_MAX_IDLE_COUNTER			800
 #define GPU_COUNTER_INCREASE			8
-#define GPU_SEMI_BUSY_THRESHOLD			260
-#define GPU_SEMI_BUSY_CLR_THRESHOLD		180
-#define GPU_BUSY_THRESHOLD			700
-#define GPU_BUSY_CLR_THRESHOLD			500
+#define GPU_SEMI_BUSY_THRESHOLD			440
+#define GPU_SEMI_BUSY_CLR_THRESHOLD		305
+#define GPU_BUSY_THRESHOLD			1185
+#define GPU_BUSY_CLR_THRESHOLD			845
 #define DECREASE_GPU_IDLE_COUNTER		4
 #endif
 
@@ -80,7 +81,7 @@ bool gpu_busy_state;
 static unsigned int min_sampling_rate;
 
 #define LATENCY_MULTIPLIER			(1000)
-#define MIN_LATENCY_MULTIPLIER			(20)
+#define MIN_LATENCY_MULTIPLIER			(100)
 #define TRANSITION_LATENCY_LIMIT		(10 * 1000 * 1000)
 
 #define POWERSAVE_BIAS_MAXLEVEL			(1000)
@@ -196,15 +197,15 @@ static inline cputime64_t get_cpu_idle_time_jiffy(unsigned int cpu,
 	cputime64_t busy_time;
 
 	cur_wall_time = jiffies64_to_cputime64(get_jiffies_64());
+	busy_time = cputime64_add(kstat_cpu(cpu).cpustat.user,
+			kstat_cpu(cpu).cpustat.system);
 
-	busy_time  = kcpustat_cpu(cpu).cpustat[CPUTIME_USER];
-	busy_time += kcpustat_cpu(cpu).cpustat[CPUTIME_SYSTEM];
-	busy_time += kcpustat_cpu(cpu).cpustat[CPUTIME_IRQ];
-	busy_time += kcpustat_cpu(cpu).cpustat[CPUTIME_SOFTIRQ];
-	busy_time += kcpustat_cpu(cpu).cpustat[CPUTIME_STEAL];
-	busy_time += kcpustat_cpu(cpu).cpustat[CPUTIME_NICE];
+	busy_time = cputime64_add(busy_time, kstat_cpu(cpu).cpustat.irq);
+	busy_time = cputime64_add(busy_time, kstat_cpu(cpu).cpustat.softirq);
+	busy_time = cputime64_add(busy_time, kstat_cpu(cpu).cpustat.steal);
+	busy_time = cputime64_add(busy_time, kstat_cpu(cpu).cpustat.nice);
 
-	idle_time = (cur_wall_time - busy_time);
+	idle_time = cputime64_sub(cur_wall_time, busy_time);
 	if (wall)
 		*wall = (cputime64_t)jiffies_to_usecs(cur_wall_time);
 
@@ -504,7 +505,7 @@ static ssize_t store_ignore_nice_load(struct kobject *a, struct attribute *b,
 		bds_info->prev_cpu_idle = get_cpu_idle_time(j,
 						&bds_info->prev_cpu_wall);
 		if (bds_tuners_ins.ignore_nice)
-			bds_info->prev_cpu_nice = kcpustat_cpu(j).cpustat[CPUTIME_NICE];
+			bds_info->prev_cpu_nice = kstat_cpu(j).cpustat.nice;
 
 	}
 	return count;
@@ -874,20 +875,24 @@ static void bds_check_cpu(struct cpu_bds_info_s *this_bds_info)
 		cur_idle_time = get_cpu_idle_time(j, &cur_wall_time);
 		cur_iowait_time = get_cpu_iowait_time(j, &cur_wall_time);
 
-		wall_time = (unsigned int) (cur_wall_time - j_bds_info->prev_cpu_wall);
+		wall_time = (unsigned int) cputime64_sub(cur_wall_time,
+				j_bds_info->prev_cpu_wall);
 		j_bds_info->prev_cpu_wall = cur_wall_time;
 
-		idle_time = (unsigned int) (cur_idle_time - j_bds_info->prev_cpu_idle);
+		idle_time = (unsigned int) cputime64_sub(cur_idle_time,
+				j_bds_info->prev_cpu_idle);
 		j_bds_info->prev_cpu_idle = cur_idle_time;
 
-		iowait_time = (unsigned int) (cur_iowait_time - j_bds_info->prev_cpu_iowait);
+		iowait_time = (unsigned int) cputime64_sub(cur_iowait_time,
+				j_bds_info->prev_cpu_iowait);
 		j_bds_info->prev_cpu_iowait = cur_iowait_time;
 
 		if (bds_tuners_ins.ignore_nice) {
 			cputime64_t cur_nice;
 			unsigned long cur_nice_jiffies;
 
-			cur_nice = (kcpustat_cpu(j).cpustat[CPUTIME_NICE] - j_bds_info->prev_cpu_nice);
+			cur_nice = cputime64_sub(kstat_cpu(j).cpustat.nice,
+					 j_bds_info->prev_cpu_nice);
 			/*
 			 * Assumption: nice time between sampling periods will
 			 * be less than 2^32 jiffies for 32 bit sys
@@ -895,7 +900,7 @@ static void bds_check_cpu(struct cpu_bds_info_s *this_bds_info)
 			cur_nice_jiffies = (unsigned long)
 					cputime64_to_jiffies64(cur_nice);
 
-			j_bds_info->prev_cpu_nice = kcpustat_cpu(j).cpustat[CPUTIME_NICE];
+			j_bds_info->prev_cpu_nice = kstat_cpu(j).cpustat.nice;
 			idle_time += jiffies_to_usecs(cur_nice_jiffies);
 		}
 
@@ -1198,10 +1203,11 @@ static void bds_refresh_callback(struct work_struct *unused)
 		return;
 	}
 
-	if (policy->cur < policy->max) {
-		policy->cur = policy->max;
-
-		__cpufreq_driver_target(policy, policy->max,
+	if (policy->cur < DBS_INPUT_EVENT_MIN_FREQ) {
+		/*
+		pr_info("%s: set cpufreq to DBS_INPUT_EVENT_MIN_FREQ(%d) directly due to input events!\n", __func__, DBS_INPUT_EVENT_MIN_FREQ);
+		*/
+		__cpufreq_driver_target(policy, DBS_INPUT_EVENT_MIN_FREQ,
 					CPUFREQ_RELATION_L);
 		this_bds_info->prev_cpu_idle = get_cpu_idle_time(cpu,
 				&this_bds_info->prev_cpu_wall);
@@ -1209,7 +1215,7 @@ static void bds_refresh_callback(struct work_struct *unused)
 	unlock_policy_rwsem_write(cpu);
 }
 
-static unsigned int enable_bds_input_event;
+static unsigned int enable_bds_input_event = 1;
 static void bds_input_event(struct input_handle *handle, unsigned int type,
 		unsigned int code, int value)
 {
@@ -1229,11 +1235,25 @@ static void bds_input_event(struct input_handle *handle, unsigned int type,
 	}
 }
 
+static int input_dev_filter(const char *input_dev_name)
+{
+	if (strstr(input_dev_name, "touchscreen") || strstr(input_dev_name, "-keypad") ||
+		strstr(input_dev_name, "-nav") || strstr(input_dev_name, "-oj")) {
+               return 0;
+       } else {
+               return 1;
+       }
+}
+
 static int bds_input_connect(struct input_handler *handler,
 		struct input_dev *dev, const struct input_device_id *id)
 {
 	struct input_handle *handle;
 	int error;
+
+	/* filter out those input_dev that we don't care */
+	if (input_dev_filter(dev->name))
+		return -ENODEV;
 
 	handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
 	if (!handle)
@@ -1306,7 +1326,7 @@ static int cpufreq_governor_bds(struct cpufreq_policy *policy,
 						&j_bds_info->prev_cpu_wall);
 			if (bds_tuners_ins.ignore_nice) {
 				j_bds_info->prev_cpu_nice =
-						kcpustat_cpu(j).cpustat[CPUTIME_NICE];
+						kstat_cpu(j).cpustat.nice;
 			}
 		}
 		this_bds_info->cpu = cpu;
@@ -1458,3 +1478,4 @@ fs_initcall(cpufreq_gov_bds_init);
 module_init(cpufreq_gov_bds_init);
 #endif
 module_exit(cpufreq_gov_bds_exit);
+
