@@ -993,9 +993,7 @@ void disable_core_control(bool disable)
 	if (state->inited && (state->disabled != disable))
 		state->disabled = disable;
 
-	state = &per_cpu(cpu_state, 4);
-	if (state->inited && (state->disabled != disable))
-		state->disabled = disable;
+	
 }
 
 
